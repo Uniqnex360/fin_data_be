@@ -1,0 +1,5 @@
+# to up a server
+docker-compose -f docker/deployment/app.yml up
+
+# to run django commands
+docker exec -it fin_data_be python manage.py makemigrations

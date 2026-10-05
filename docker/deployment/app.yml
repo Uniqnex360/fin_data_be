@@ -1,0 +1,98 @@
+version: "3"
+
+services:
+  fin_data_be:
+    container_name: fin_data_be
+    build:
+      context: ../../
+      dockerfile: ./docker/deployment/dockerfiles/Dockerfile-app
+
+    volumes:
+      - ../../:/app:z
+
+    env_file:
+      - ../../.env
+
+    ports:
+      - "8000:8000"
+
+    depends_on:
+      - postgres
+      - redis
+      - supervisor
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    command: >
+      bash -c
+      "gunicorn config.wsgi
+      -b 0.0.0.0:8000
+      --chdir=/app
+      --reload
+      --timeout 0
+      "
+
+  postgres:
+    image: postgres:16
+
+    container_name: fin_data_postgres
+
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: fin_data_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+
+    ports:
+      - "5432:5432"
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d fin_data_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:latest
+
+    container_name: fin_data_redis
+
+    restart: unless-stopped
+
+    ports:
+      - "6379:6379"
+
+  supervisor:
+    build:
+      context: ../../
+      dockerfile: ./docker/deployment/dockerfiles/Dockerfile-app
+
+    container_name: fin_data_supervisor
+
+    volumes:
+      - ../../:/app:z
+
+    env_file:
+      - ../../.env
+
+    ports:
+      - "5555:5555"
+      - "9001:9001"
+
+    depends_on:
+      - redis
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    command: >
+      /usr/bin/supervisord
+      -c /etc/supervisor/supervisord.conf
+
+volumes:
+  postgres_data:
