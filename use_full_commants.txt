@@ -3,3 +3,10 @@ docker-compose -f docker/deployment/app.yml up
 
 # to run django commands
 docker exec -it fin_data_be python manage.py makemigrations
+
+# for production
+# to builld a docker image
+docker rm -f fin-data-be
+docker build -t fin-data-be .
+# to run 
+docker run -d --name fin-data-be -e PORT=8000 -p 8000:8000 fin-data-be

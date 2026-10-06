@@ -1,1 +1,1 @@
-from .bank_account import BankDocumentFile
+from .bank_account import BankDocumentFile, BankAccountBase

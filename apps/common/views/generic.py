@@ -262,6 +262,7 @@ def get_upload_api_view(meta_model, max_file_size=MAX_FILE_SIZE):
     class _View(AppCreateAPIView):
         parser_classes = [parsers.MultiPartParser]
         serializer_class = _Serializer
+        permission_classes = []
 
         def create(self, request, *args, **kwargs):
             if "file" not in request.data:
