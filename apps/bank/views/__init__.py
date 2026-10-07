@@ -5,3 +5,8 @@ from .cluster_statement import (
     BankFileListAPIViewSet,
     BankStatementDetailAPIView,
 )
+from .manual_extraction import (
+    ManualDataExtractionView,
+    ManualExtractionListAPIViewSet,
+    ManualBankStatementDetailAPIView,
+)

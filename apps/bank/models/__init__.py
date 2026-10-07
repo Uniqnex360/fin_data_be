@@ -1,1 +1,2 @@
 from .bank_account import BankDocumentFile, BankAccountBase
+from .manual_extraction import ManualBankAccountBase

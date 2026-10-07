@@ -1,1 +1,2 @@
 from .bank_statement import BankDocumentFileSerializer
+from .manual_extraction import ManualBankAccountBaseSerializer
