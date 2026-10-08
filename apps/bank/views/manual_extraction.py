@@ -1,9 +1,13 @@
+import csv
 import re
 
+import openpyxl
 import pymupdf
 
+from datetime import date, datetime
 from decimal import Decimal
 from collections import defaultdict
+from pathlib import Path
 
 from django.db import transaction
 
@@ -38,12 +42,12 @@ def extract_account_details(pages):
         return match.group(1).strip() if match else None
 
     return {
-        "business_name": extract(r"Business Name\s*\n(.+)"),
-        "account_reference": extract(r"Account Reference\s*\n(.+)"),
-        "business_type": extract(r"Business Type\s*\n(.+)"),
-        "statement_period": extract(r"Statement Period\s*\n(.+)"),
-        "opening_balance": extract(r"Opening Balance\s*\n([^\n]+)"),
-        "closing_balance": extract(r"Closing Balance\s*\n([^\n]+)"),
+        "business_name": extract(r"Business Name\s*\n\s*(.+)"),
+        "account_reference": extract(r"Account Reference\s*\n\s*(.+)"),
+        "business_type": extract(r"Business Type\s*\n\s*(.+)"),
+        "statement_period": extract(r"Statement Period\s*\n\s*(.+)"),
+        "opening_balance": extract(r"Opening Balance\s*\n\s*([^\n]+)"),
+        "closing_balance": extract(r"Closing Balance\s*\n\s*([^\n]+)"),
     }
 
 
@@ -51,15 +55,13 @@ DATE_PATTERN = re.compile(r"^\d{2}-\d{2}-\d{4}$")
 
 
 def clean_amount(value):
-    if not value or value.strip() == "—":
+    if value is None:
         return Decimal("0")
 
-    value = value.strip()
-    value = value.replace("I", "")
-    value = value.replace(",", "")
-    value = value.replace("₹", "")
+    # keep digits, decimal point and minus sign only (drops ₹, "I", Rs, commas, spaces, etc.)
+    value = re.sub(r"[^\d.\-]", "", str(value))
 
-    return Decimal(value)
+    return Decimal(value) if value else Decimal("0")
 
 
 def parse_transactions(pages):
@@ -110,6 +112,123 @@ def parse_transactions(pages):
             i += 7
 
     return transactions
+
+
+# ---------------------------------------------------------------------------
+# CSV / XLSX support
+# ---------------------------------------------------------------------------
+
+# statement column header -> our account key
+ACCOUNT_COLUMNS = {
+    "Business Name": "business_name",
+    "Account Reference": "account_reference",
+    "Business Type": "business_type",
+    "Statement Period": "statement_period",
+    "Opening Balance": "opening_balance",
+    "Statement Closing Balance": "closing_balance",
+}
+
+# statement column header -> our transaction key
+TRANSACTION_COLUMNS = {
+    "Date": "date",
+    "Narration": "narration",
+    "Chq./Ref. No.": "reference",
+    "Value Date": "value_date",
+    "Withdrawal (Dr)": "withdrawal",
+    "Deposit (Cr)": "deposit",
+    "Closing Balance": "closing_balance",
+}
+
+AMOUNT_FIELDS = ("withdrawal", "deposit", "closing_balance")
+DATE_FIELDS = ("date", "value_date")
+
+
+def cell_to_text(value):
+    """
+    Normalize any CSV/XLSX cell value to a clean string.
+    """
+    if value is None:
+        return ""
+
+    if isinstance(value, (datetime, date)):
+        return value.strftime("%d-%m-%Y")
+
+    return str(value).strip()
+
+
+def read_csv_rows(file):
+    text = file.read().decode("utf-8-sig")  # utf-8-sig strips the BOM
+    return list(csv.DictReader(text.splitlines()))
+
+
+def read_xlsx_rows(file):
+    workbook = openpyxl.load_workbook(file, read_only=True, data_only=True)
+
+    try:
+        rows = workbook.active.iter_rows(values_only=True)
+        headers = [cell_to_text(header) for header in next(rows, [])]
+        return [dict(zip(headers, row)) for row in rows]
+    finally:
+        workbook.close()
+
+
+def parse_tabular_statement(rows):
+    """
+    Convert CSV/XLSX rows into the same (account, transactions)
+    structure produced by the PDF flow.
+    """
+    rows = [{key: cell_to_text(value) for key, value in row.items()} for row in rows]
+    rows = [row for row in rows if any(row.values())]
+
+    if not rows:
+        raise ValueError("The file has no data rows.")
+
+    first_row = rows[0]
+    account = {key: first_row.get(column) or None for column, key in ACCOUNT_COLUMNS.items()}
+
+    transactions = []
+
+    for row in rows:
+        item = {key: row.get(column, "") for column, key in TRANSACTION_COLUMNS.items()}
+
+        if not any(DATE_PATTERN.match(item[field]) for field in DATE_FIELDS):
+            continue
+
+        for field in AMOUNT_FIELDS:
+            item[field] = clean_amount(item[field])
+
+        item["page"] = "page_1"
+        transactions.append(item)
+
+    return account, transactions
+
+
+def extract_pdf(file):
+    pages = extract_pdf_pages(file)
+    return extract_account_details(pages), parse_transactions(pages), len(pages)
+
+
+def extract_csv(file):
+    account, transactions = parse_tabular_statement(read_csv_rows(file))
+    return account, transactions, 1
+
+
+def extract_xlsx(file):
+    account, transactions = parse_tabular_statement(read_xlsx_rows(file))
+    return account, transactions, 1
+
+
+# file extension -> extractor returning (account, transactions, page_count)
+EXTRACTORS = {
+    ".pdf": extract_pdf,
+    ".csv": extract_csv,
+    ".xlsx": extract_xlsx,
+}
+
+
+# ---------------------------------------------------------------------------
+# Shared processing (unchanged)
+# ---------------------------------------------------------------------------
 
 
 def normalize_narration(narration):
@@ -169,16 +288,18 @@ def cluster_transactions(transactions):
     return result
 
 
-def process_bank_statement(pdf_file):
+def process_bank_statement(file):
     """
-    PDF -> extracted and processed bank statement data.
+    PDF / CSV / XLSX -> extracted and processed bank statement data.
     """
 
-    pages = extract_pdf_pages(pdf_file)
+    extension = Path(file.name).suffix.lower()
+    extractor = EXTRACTORS.get(extension)
 
-    account = extract_account_details(pages)
+    if extractor is None:
+        raise ValueError(f"Unsupported file type '{extension}'. Upload a PDF, CSV or XLSX file.")
 
-    transactions = parse_transactions(pages)
+    account, transactions, page_count = extractor(file)
 
     transactions = normalize_transactions(transactions)
 
@@ -189,7 +310,7 @@ def process_bank_statement(pdf_file):
         "transactions": transactions,
         "clusters": clusters,
         "summary": {
-            "page_count": len(pages),
+            "page_count": page_count,
             "transaction_count": len(transactions),
             "cluster_count": len(clusters),
         },
@@ -249,25 +370,27 @@ class ManualDataExtractionView(AppAPIView):
 
     def post(self, request, *args, **kwargs):
 
-        pdf_file = request.FILES.get("file")
+        statement_file = request.FILES.get("file")
 
-        if not pdf_file:
-            return self.send_response(message="PDF file is required.")
+        if not statement_file:
+            return self.send_response(message="A PDF, CSV or XLSX file is required.")
 
         try:
-            result = process_bank_statement(pdf_file)
+            result = process_bank_statement(statement_file)
 
             bank_account = save_bank_statement_result(result)
+
+            response_result = make_json_serializable(result)
 
             return self.send_response(
                 data={
                     "id": bank_account.id,
-                    **result,
-                }
+                    **response_result,
+                } #
             )
 
         except Exception as exc:
-            return self.send_response(message=f"Failed to process PDF: {str(exc)}")
+            return self.send_response(message=f"Failed to process file: {str(exc)}")
 
 
 class ManualExtractionListAPIViewSet(AppModelListAPIViewSet):
@@ -307,4 +430,4 @@ class ManualBankStatementDetailAPIView(AppAPIView):
             "prompt_version": obj.prompt_version,
         }
 
-        return self.send_response(data)
+        return self.send_response(data)  #
